@@ -281,13 +281,14 @@ with tab1:
                         except Exception as e:
                             status_placeholder.error(f"Error during VLM inference: {e}")
                     else:
-                        # YOLO + ByteTrack
+                        # YOLO + ByteTrack (Highly robust looping)
                         status_placeholder.info("👤 Running YOLOv8 + ByteTrack Tracker...")
                         try:
                             t_start = time.time()
                             yolo_model = load_yolo_model()
-                            # Native ByteTrack tracking
-                            results = yolo_model.track(frame, persist=True, tracker="bytetrack.yaml", conf=confidence_threshold, classes=selected_class_ids, verbose=False)
+                            
+                            classes_arg = selected_class_ids if selected_class_ids else None
+                            results = yolo_model.track(frame, persist=True, tracker="bytetrack.yaml", conf=confidence_threshold, classes=classes_arg, verbose=False)
                             t_elapsed = time.time() - t_start
                             
                             annotated_frame = results[0].plot()
@@ -296,40 +297,38 @@ with tab1:
                             spatial_events = []
                             
                             if boxes.id is not None:
-                                track_ids = boxes.id.int().cpu().tolist()
-                                active_ids = set(track_ids)
-                                xyxy = boxes.xyxy.cpu().numpy()
-                                
-                                for box, track_id in zip(xyxy, track_ids):
-                                    cls_id = int(boxes.cls[track_ids.index(track_id)])
-                                    cls_name = yolo_model.names[cls_id]
-                                    
-                                    x1, y1, x2, y2 = map(int, box)
-                                    cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
-                                    
-                                    # Update track history centroids
-                                    if track_id not in st.session_state.track_history:
-                                        st.session_state.track_history[track_id] = []
-                                    st.session_state.track_history[track_id].append((cx, cy))
-                                    if len(st.session_state.track_history[track_id]) > 30:
-                                        st.session_state.track_history[track_id].pop(0)
+                                for box in boxes:
+                                    if box.id is not None:
+                                        track_id = int(box.id[0])
+                                        active_ids.add(track_id)
+                                        cls_id = int(box.cls[0])
+                                        cls_name = yolo_model.names[cls_id]
                                         
-                                    # Entry logging
-                                    if track_id not in st.session_state.track_first_seen:
-                                        st.session_state.track_first_seen[track_id] = now
-                                    st.session_state.track_last_seen[track_id] = now
-                                    
-                                    if track_id not in st.session_state.track_logged_entry:
-                                        spatial_events.append(f"🟢 **{cls_name.capitalize()} #{track_id}** entered.")
-                                        st.session_state.track_logged_entry.add(track_id)
+                                        xyxy_coords = box.xyxy[0].cpu().numpy()
+                                        x1, y1, x2, y2 = map(int, xyxy_coords)
+                                        cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
+                                        
+                                        # Update track history centroids
+                                        if track_id not in st.session_state.track_history:
+                                            st.session_state.track_history[track_id] = []
+                                        st.session_state.track_history[track_id].append((cx, cy))
+                                        if len(st.session_state.track_history[track_id]) > 30:
+                                            st.session_state.track_history[track_id].pop(0)
+                                            
+                                        # Entry logging
+                                        if track_id not in st.session_state.track_first_seen:
+                                            st.session_state.track_first_seen[track_id] = now
+                                        st.session_state.track_last_seen[track_id] = now
+                                        
+                                        if track_id not in st.session_state.track_logged_entry:
+                                            spatial_events.append(f"🟢 **{cls_name.capitalize()} #{track_id}** entered.")
+                                            st.session_state.track_logged_entry.add(track_id)
                             
                             # Exit / Dwell-time logging
                             for track_id in list(st.session_state.track_first_seen.keys()):
                                 if track_id not in active_ids and (now - st.session_state.track_last_seen[track_id]) > 3.0:
                                     if track_id not in st.session_state.track_logged_exit:
                                         dwell = st.session_state.track_last_seen[track_id] - st.session_state.track_first_seen[track_id]
-                                        # Lookup class name
-                                        cls_label = "Object"
                                         spatial_events.append(f"🔴 **ID #{track_id}** exited (Dwell time: {dwell:.1f}s).")
                                         st.session_state.track_logged_exit.add(track_id)
                             
@@ -405,7 +404,7 @@ with tab2:
                 st.error("Error reading video headers.")
             else:
                 duration = total_frames / fps
-                st.write(f"🎞| Duration: {duration:.1f}s | Frames: {total_frames} | FPS: {fps:.1f}")
+                st.write(f"🎞️ Duration: {duration:.1f}s | Frames: {total_frames} | FPS: {fps:.1f}")
                 
                 frame_step = int(fps * sample_interval)
                 if frame_step <= 0:
@@ -457,12 +456,14 @@ with tab2:
                         except Exception as e:
                             st.error(f"Error at frame {current_frame_idx}: {e}")
                     else:
-                        # YOLO + ByteTrack Offline
+                        # YOLO + ByteTrack Offline (Ultra robust indexing)
                         vid_status.info(f"👤 Tracking targets at {time_sec:.1f}s...")
                         try:
                             t_start = time.time()
                             yolo_model = load_yolo_model()
-                            results = yolo_model.track(frame, persist=True, tracker="bytetrack.yaml", conf=confidence_threshold, classes=selected_class_ids, verbose=False)
+                            
+                            classes_arg = selected_class_ids if selected_class_ids else None
+                            results = yolo_model.track(frame, persist=True, tracker="bytetrack.yaml", conf=confidence_threshold, classes=classes_arg, verbose=False)
                             t_elapsed = time.time() - t_start
                             
                             annotated_frame = results[0].plot()
@@ -471,30 +472,30 @@ with tab2:
                             spatial_events = []
                             
                             if boxes.id is not None:
-                                track_ids = boxes.id.int().cpu().tolist()
-                                active_ids = set(track_ids)
-                                xyxy = boxes.xyxy.cpu().numpy()
-                                
-                                for box, track_id in zip(xyxy, track_ids):
-                                    cls_id = int(boxes.cls[track_ids.index(track_id)])
-                                    cls_name = yolo_model.names[cls_id]
-                                    
-                                    x1, y1, x2, y2 = map(int, box)
-                                    cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
-                                    
-                                    if track_id not in st.session_state.track_history:
-                                        st.session_state.track_history[track_id] = []
-                                    st.session_state.track_history[track_id].append((cx, cy))
-                                    if len(st.session_state.track_history[track_id]) > 30:
-                                        st.session_state.track_history[track_id].pop(0)
+                                for box in boxes:
+                                    if box.id is not None:
+                                        track_id = int(box.id[0])
+                                        active_ids.add(track_id)
+                                        cls_id = int(box.cls[0])
+                                        cls_name = yolo_model.names[cls_id]
                                         
-                                    if track_id not in st.session_state.track_first_seen:
-                                        st.session_state.track_first_seen[track_id] = time_sec
-                                    st.session_state.track_last_seen[track_id] = time_sec
-                                    
-                                    if track_id not in st.session_state.track_logged_entry:
-                                        spatial_events.append(f"🟢 **{cls_name.capitalize()} #{track_id}** entered.")
-                                        st.session_state.track_logged_entry.add(track_id)
+                                        xyxy_coords = box.xyxy[0].cpu().numpy()
+                                        x1, y1, x2, y2 = map(int, xyxy_coords)
+                                        cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
+                                        
+                                        if track_id not in st.session_state.track_history:
+                                            st.session_state.track_history[track_id] = []
+                                        st.session_state.track_history[track_id].append((cx, cy))
+                                        if len(st.session_state.track_history[track_id]) > 30:
+                                            st.session_state.track_history[track_id].pop(0)
+                                            
+                                        if track_id not in st.session_state.track_first_seen:
+                                            st.session_state.track_first_seen[track_id] = time_sec
+                                        st.session_state.track_last_seen[track_id] = time_sec
+                                        
+                                        if track_id not in st.session_state.track_logged_entry:
+                                            spatial_events.append(f"🟢 **{cls_name.capitalize()} #{track_id}** entered.")
+                                            st.session_state.track_logged_entry.add(track_id)
                             
                             # Exit / Dwell-time logging
                             for track_id in list(st.session_state.track_first_seen.keys()):
