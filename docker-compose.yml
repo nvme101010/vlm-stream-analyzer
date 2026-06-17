@@ -1,0 +1,14 @@
+services:
+  vlm-stream-analyzer:
+    build: .
+    container_name: vlm-stream-analyzer
+    restart: always
+    ports:
+      - "8501:8501"
+    networks:
+      - ollama-net
+
+networks:
+  ollama-net:
+    name: ollama-webui_default
+    external: true

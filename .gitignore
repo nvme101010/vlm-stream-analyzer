@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.pt
+*.onnx
+*.log
+.DS_Store
+.streamlit/
