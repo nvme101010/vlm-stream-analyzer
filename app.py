@@ -9,7 +9,7 @@ import tempfile
 import os
 
 st.set_page_config(
-    page_title="VLM & CV Stream Analyzer",
+    page_title="VLM & MOT Stream Analyzer",
     page_icon="🎥",
     layout="wide"
 )
@@ -21,6 +21,25 @@ if 'rtsp_url' not in st.session_state:
     st.session_state.rtsp_url = ""
 if 'log_history' not in st.session_state:
     st.session_state.log_history = []
+
+# Persistent Multi-Object Tracking State
+if 'track_history' not in st.session_state:
+    st.session_state.track_history = {}
+if 'track_first_seen' not in st.session_state:
+    st.session_state.track_first_seen = {}
+if 'track_last_seen' not in st.session_state:
+    st.session_state.track_last_seen = {}
+if 'track_logged_entry' not in st.session_state:
+    st.session_state.track_logged_entry = set()
+if 'track_logged_exit' not in st.session_state:
+    st.session_state.track_logged_exit = set()
+
+def clear_tracking_state():
+    st.session_state.track_history = {}
+    st.session_state.track_first_seen = {}
+    st.session_state.track_last_seen = {}
+    st.session_state.track_logged_entry = set()
+    st.session_state.track_logged_exit = set()
 
 class RTSPThreadReader:
     def __init__(self, url):
@@ -114,6 +133,11 @@ def generate_thumbnails(frame, boxes, names_dict):
         cls_id = int(box.cls[0])
         cls_name = names_dict[cls_id]
         
+        # Pull track ID if present
+        track_suffix = ""
+        if box.id is not None:
+            track_suffix = f" #{int(box.id[0])}"
+            
         xyxy = box.xyxy[0].cpu().numpy()
         x1, y1, x2, y2 = map(int, xyxy)
         
@@ -131,24 +155,41 @@ def generate_thumbnails(frame, boxes, names_dict):
             thumbnails_html.append(
                 f'<div style="display:inline-block; margin-right:8px; text-align:center;">'
                 f'<img src="data:image/jpeg;base64,{crop_b64}" style="height:60px; border:1px solid #ddd; border-radius:4px; vertical-align:middle;"><br/>'
-                f'<span style="font-size:9px; color:#777; font-weight:bold;">{cls_name}</span>'
+                f'<span style="font-size:9px; color:#777; font-weight:bold;">{cls_name}{track_suffix}</span>'
                 f'</div>'
             )
     return "".join(thumbnails_html)
 
+# Draw motion trails for tracked targets
+def draw_motion_trails(frame, track_history):
+    for track_id, points in track_history.items():
+        if len(points) < 2:
+            continue
+        # Select persistent unique color per track ID
+        color = (
+            int((track_id * 73) % 200 + 55),
+            int((track_id * 149) % 200 + 55),
+            int((track_id * 223) % 200 + 55)
+        )
+        for i in range(len(points) - 1):
+            pt1 = points[i]
+            pt2 = points[i+1]
+            thickness = int(np.clip(1 + i * 0.15, 1, 4)) # Trail grows thicker at current position
+            cv2.line(frame, pt1, pt2, color, thickness)
+
 # Render UI
-st.title("🎥 Hybrid VLM & Object Detection Stream Analyzer")
-st.markdown("Analyze live video streams or files using high-speed CV models (**YOLOv8**) or rich semantic **VLMs (via Ollama)** on CPU.")
+st.title("🎥 Hybrid VLM & MOT Stream Analyzer")
+st.markdown("Analyze live video streams or files using high-speed multi-object tracking (**YOLOv8 + ByteTrack**) or rich semantic **VLMs (via Ollama)** on CPU.")
 
 # Sidebar Configuration
 st.sidebar.header("⚙️ Model Configuration")
 analysis_engine = st.sidebar.radio(
     "Analysis Engine",
-    options=["👤 Person Detection (YOLOv8)", "🤖 Vision-Language Model (VLM)"],
-    help="YOLOv8 runs at 30+ FPS on CPU with pinpoint person bounding-boxes. VLM provides rich textual description but takes several seconds per frame."
+    options=["👤 Persistent Tracking (YOLOv8 + ByteTrack)", "🤖 Vision-Language Model (VLM)"],
+    help="YOLOv8 with ByteTrack maintains ID tracking, movement trails, and calculates dwell-time on CPU. VLM provides deep conversational descriptions."
 )
 
-sample_interval = st.sidebar.slider("Sampling Interval (seconds)", min_value=0.1 if "YOLO" in analysis_engine else 1.0, max_value=30.0, value=1.0 if "YOLO" in analysis_engine else 3.0, step=0.1 if "YOLO" in analysis_engine else 0.5)
+sample_interval = st.sidebar.slider("Sampling Interval (seconds)", min_value=0.1 if "YOLO" in analysis_engine else 1.0, max_value=30.0, value=0.5 if "YOLO" in analysis_engine else 3.0, step=0.1 if "YOLO" in analysis_engine else 0.5)
 
 if "VLM" in analysis_engine:
     st.sidebar.subheader("🤖 VLM Parameters")
@@ -160,12 +201,14 @@ if "VLM" in analysis_engine:
     use_motion_skip = st.sidebar.checkbox("Motion Detection Auto-Skip", value=True)
     motion_sensitivity = st.sidebar.slider("Motion Sensitivity Threshold (%)", min_value=0.1, max_value=10.0, value=1.5, step=0.1)
 else:
-    st.sidebar.subheader("👤 YOLOv8 Parameters")
+    st.sidebar.subheader("👤 YOLO + ByteTrack Parameters")
     confidence_threshold = st.sidebar.slider("Detection Confidence", min_value=0.1, max_value=1.0, value=0.25, step=0.05)
-    target_classes = st.sidebar.multiselect("Classes to Detect", options=["person", "bicycle", "car", "motorcycle", "backpack", "umbrella", "handbag", "dog", "cat"], default=["person"])
+    target_classes = st.sidebar.multiselect("Classes to Track", options=["person", "bicycle", "car", "motorcycle", "backpack", "umbrella", "handbag", "dog", "cat"], default=["person"])
     
     coco_classes = {"person": 0, "bicycle": 1, "car": 2, "motorcycle": 3, "backpack": 24, "umbrella": 25, "handbag": 26, "dog": 16, "cat": 15}
     selected_class_ids = [coco_classes[cls] for cls in target_classes]
+    
+    show_trails = st.sidebar.checkbox("Draw Motion Trail Lines", value=True, help="Renders colorful trajectory paths illustrating the movement history of each tracked object.")
 
 # Tabs for Mode
 tab1, tab2 = st.tabs(["🔴 RTSP / Live Stream", "📤 Local Video Upload"])
@@ -197,6 +240,7 @@ with tab1:
         if st.session_state.rtsp_reader:
             st.session_state.rtsp_reader.stop()
         
+        clear_tracking_state()
         st.session_state.rtsp_reader = RTSPThreadReader(rtsp_input)
         st.session_state.rtsp_url = rtsp_input
         st.success("Connected and streaming in background...")
@@ -237,36 +281,84 @@ with tab1:
                         except Exception as e:
                             status_placeholder.error(f"Error during VLM inference: {e}")
                     else:
-                        # YOLO Path with dynamically cropped thumbnails
-                        status_placeholder.info("👤 Running YOLOv8 Detection...")
+                        # YOLO + ByteTrack
+                        status_placeholder.info("👤 Running YOLOv8 + ByteTrack Tracker...")
                         try:
                             t_start = time.time()
                             yolo_model = load_yolo_model()
-                            results = yolo_model(frame, conf=confidence_threshold, classes=selected_class_ids, verbose=False)
+                            # Native ByteTrack tracking
+                            results = yolo_model.track(frame, persist=True, tracker="bytetrack.yaml", conf=confidence_threshold, classes=selected_class_ids, verbose=False)
                             t_elapsed = time.time() - t_start
                             
                             annotated_frame = results[0].plot()
+                            boxes = results[0].boxes
+                            active_ids = set()
+                            spatial_events = []
+                            
+                            if boxes.id is not None:
+                                track_ids = boxes.id.int().cpu().tolist()
+                                active_ids = set(track_ids)
+                                xyxy = boxes.xyxy.cpu().numpy()
+                                
+                                for box, track_id in zip(xyxy, track_ids):
+                                    cls_id = int(boxes.cls[track_ids.index(track_id)])
+                                    cls_name = yolo_model.names[cls_id]
+                                    
+                                    x1, y1, x2, y2 = map(int, box)
+                                    cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
+                                    
+                                    # Update track history centroids
+                                    if track_id not in st.session_state.track_history:
+                                        st.session_state.track_history[track_id] = []
+                                    st.session_state.track_history[track_id].append((cx, cy))
+                                    if len(st.session_state.track_history[track_id]) > 30:
+                                        st.session_state.track_history[track_id].pop(0)
+                                        
+                                    # Entry logging
+                                    if track_id not in st.session_state.track_first_seen:
+                                        st.session_state.track_first_seen[track_id] = now
+                                    st.session_state.track_last_seen[track_id] = now
+                                    
+                                    if track_id not in st.session_state.track_logged_entry:
+                                        spatial_events.append(f"🟢 **{cls_name.capitalize()} #{track_id}** entered.")
+                                        st.session_state.track_logged_entry.add(track_id)
+                            
+                            # Exit / Dwell-time logging
+                            for track_id in list(st.session_state.track_first_seen.keys()):
+                                if track_id not in active_ids and (now - st.session_state.track_last_seen[track_id]) > 3.0:
+                                    if track_id not in st.session_state.track_logged_exit:
+                                        dwell = st.session_state.track_last_seen[track_id] - st.session_state.track_first_seen[track_id]
+                                        # Lookup class name
+                                        cls_label = "Object"
+                                        spatial_events.append(f"🔴 **ID #{track_id}** exited (Dwell time: {dwell:.1f}s).")
+                                        st.session_state.track_logged_exit.add(track_id)
+                            
+                            # Render motion trails
+                            if show_trails and st.session_state.track_history:
+                                draw_motion_trails(annotated_frame, st.session_state.track_history)
+                                
                             rgb_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
                             frame_placeholder.image(rgb_frame, channels="RGB", use_column_width=True)
                             
                             # Count objects
                             detections = {}
-                            for box in results[0].boxes:
+                            for box in boxes:
                                 cls_name = yolo_model.names[int(box.cls[0])]
                                 detections[cls_name] = detections.get(cls_name, 0) + 1
+                            det_summary = ", ".join([f"{count} {name}(s)" for name, count in detections.items()]) if detections else "No targets tracked"
                             
-                            det_summary = ", ".join([f"{count} {name}(s)" for name, count in detections.items()]) if detections else "No objects detected"
-                            
-                            # Generate base64 crop thumbnails
-                            thumbs_html = generate_thumbnails(frame, results[0].boxes, yolo_model.names)
+                            # Base64 crops
+                            thumbs_html = generate_thumbnails(frame, boxes, yolo_model.names)
                             thumbs_div = f"<div style='margin-top:6px;'>{thumbs_html}</div>" if thumbs_html else ""
+                            spatial_str = " | ".join(spatial_events) if spatial_events else ""
+                            spatial_p = f"<div style='font-size:11px; color:#ef5350; font-weight:bold;'>{spatial_str}</div>" if spatial_str else ""
                             
                             timestamp = time.strftime('%H:%M:%S')
-                            event = f"**[{timestamp}]** *(YOLO Inference: {t_elapsed*1000:.1f}ms)*:  \n🎯 **Detections:** {det_summary}\n{thumbs_div}\n\n---"
+                            event = f"**[{timestamp}]** *(MOT Inference: {t_elapsed*1000:.1f}ms)*:  \n🎯 **Active Detections:** {det_summary}\n{spatial_p}{thumbs_div}\n\n---"
                             st.session_state.log_history.insert(0, event)
-                            status_placeholder.success(f"YOLO Ran in {t_elapsed*1000:.1f}ms!")
+                            status_placeholder.success(f"MOT Ran in {t_elapsed*1000:.1f}ms!")
                         except Exception as e:
-                            status_placeholder.error(f"Error during YOLO inference: {e}")
+                            status_placeholder.error(f"Error during MOT tracking: {e}")
                 else:
                     if "VLM" in analysis_engine or last_frame_processed is None:
                         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -299,6 +391,7 @@ with tab2:
         
         if process_vid_btn:
             vid_logs = []
+            clear_tracking_state()
             
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tfile:
                 tfile.write(uploaded_file.read())
@@ -312,7 +405,7 @@ with tab2:
                 st.error("Error reading video headers.")
             else:
                 duration = total_frames / fps
-                st.write(f"🎞️ Duration: {duration:.1f}s | Frames: {total_frames} | FPS: {fps:.1f}")
+                st.write(f"🎞| Duration: {duration:.1f}s | Frames: {total_frames} | FPS: {fps:.1f}")
                 
                 frame_step = int(fps * sample_interval)
                 if frame_step <= 0:
@@ -364,35 +457,77 @@ with tab2:
                         except Exception as e:
                             st.error(f"Error at frame {current_frame_idx}: {e}")
                     else:
-                        vid_status.info(f"👤 Running YOLOv8 detection at {time_sec:.1f}s...")
+                        # YOLO + ByteTrack Offline
+                        vid_status.info(f"👤 Tracking targets at {time_sec:.1f}s...")
                         try:
                             t_start = time.time()
                             yolo_model = load_yolo_model()
-                            results = yolo_model(frame, conf=confidence_threshold, classes=selected_class_ids, verbose=False)
+                            results = yolo_model.track(frame, persist=True, tracker="bytetrack.yaml", conf=confidence_threshold, classes=selected_class_ids, verbose=False)
                             t_elapsed = time.time() - t_start
                             
                             annotated_frame = results[0].plot()
+                            boxes = results[0].boxes
+                            active_ids = set()
+                            spatial_events = []
+                            
+                            if boxes.id is not None:
+                                track_ids = boxes.id.int().cpu().tolist()
+                                active_ids = set(track_ids)
+                                xyxy = boxes.xyxy.cpu().numpy()
+                                
+                                for box, track_id in zip(xyxy, track_ids):
+                                    cls_id = int(boxes.cls[track_ids.index(track_id)])
+                                    cls_name = yolo_model.names[cls_id]
+                                    
+                                    x1, y1, x2, y2 = map(int, box)
+                                    cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
+                                    
+                                    if track_id not in st.session_state.track_history:
+                                        st.session_state.track_history[track_id] = []
+                                    st.session_state.track_history[track_id].append((cx, cy))
+                                    if len(st.session_state.track_history[track_id]) > 30:
+                                        st.session_state.track_history[track_id].pop(0)
+                                        
+                                    if track_id not in st.session_state.track_first_seen:
+                                        st.session_state.track_first_seen[track_id] = time_sec
+                                    st.session_state.track_last_seen[track_id] = time_sec
+                                    
+                                    if track_id not in st.session_state.track_logged_entry:
+                                        spatial_events.append(f"🟢 **{cls_name.capitalize()} #{track_id}** entered.")
+                                        st.session_state.track_logged_entry.add(track_id)
+                            
+                            # Exit / Dwell-time logging
+                            for track_id in list(st.session_state.track_first_seen.keys()):
+                                if track_id not in active_ids and (time_sec - st.session_state.track_last_seen[track_id]) > (sample_interval * 3):
+                                    if track_id not in st.session_state.track_logged_exit:
+                                        dwell = st.session_state.track_last_seen[track_id] - st.session_state.track_first_seen[track_id]
+                                        spatial_events.append(f"🔴 **ID #{track_id}** exited (Dwell time: {dwell:.1f}s).")
+                                        st.session_state.track_logged_exit.add(track_id)
+                                        
+                            if show_trails and st.session_state.track_history:
+                                draw_motion_trails(annotated_frame, st.session_state.track_history)
+                                
                             rgb_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
                             vid_frame_placeholder.image(rgb_frame, channels="RGB", use_column_width=True)
                             
                             # Count objects
                             detections = {}
-                            for box in results[0].boxes:
+                            for box in boxes:
                                 cls_name = yolo_model.names[int(box.cls[0])]
                                 detections[cls_name] = detections.get(cls_name, 0) + 1
+                            det_summary = ", ".join([f"{count} {name}(s)" for name, count in detections.items()]) if detections else "No targets tracked"
                             
-                            det_summary = ", ".join([f"{count} {name}(s)" for name, count in detections.items()]) if detections else "No objects detected"
-                            
-                            # Generate base64 crop thumbnails
-                            thumbs_html = generate_thumbnails(frame, results[0].boxes, yolo_model.names)
+                            thumbs_html = generate_thumbnails(frame, boxes, yolo_model.names)
                             thumbs_div = f"<div style='margin-top:6px;'>{thumbs_html}</div>" if thumbs_html else ""
+                            spatial_str = " | ".join(spatial_events) if spatial_events else ""
+                            spatial_p = f"<div style='font-size:11px; color:#ef5350; font-weight:bold;'>{spatial_str}</div>" if spatial_str else ""
                             
                             timestamp_str = f"{int(time_sec // 60):02d}:{int(time_sec % 60):02d}"
-                            event = f"**[{timestamp_str}]** *(YOLO Inference: {t_elapsed*1000:.1f}ms)*:  \n🎯 **Detections:** {det_summary}\n{thumbs_div}\n\n---"
+                            event = f"**[{timestamp_str}]** *(MOT Inference: {t_elapsed*1000:.1f}ms)*:  \n🎯 **Active Detections:** {det_summary}\n{spatial_p}{thumbs_div}\n\n---"
                             vid_logs.insert(0, event)
                             vid_log_placeholder.markdown("\n".join(vid_logs), unsafe_allow_html=True)
                         except Exception as e:
-                            st.error(f"Error at frame {current_frame_idx}: {e}")
+                            st.error(f"Error during MOT tracking: {e}")
                 
                 progress_bar.progress(1.0)
                 vid_status.success("Video processing complete!")
