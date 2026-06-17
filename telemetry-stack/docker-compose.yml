@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  # 1. The InfluxDB Time-Series Database
+  influxdb:
+    image: influxdb:2.7
+    container_name: tsdb-influx
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=my-secure-password
+      - DOCKER_INFLUXDB_INIT_ORG=my-factory
+      - DOCKER_INFLUXDB_INIT_BUCKET=telemetry_data
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=my-super-secret-auth-token-12345
+    volumes:
+      - influxdb-storage:/var/lib/influxdb2
+
+  # 2. The Telegraf Ingestion Agent
+  telegraf:
+    image: telegraf:latest
+    container_name: pipeline-telegraf
+    restart: unless-stopped
+    depends_on:
+      - influxdb
+    volumes:
+      - ./telegraf.conf:/etc/telegraf/telegraf.conf:ro
+
+  # 3. The Grafana Visualization UI
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ui-grafana
+    restart: unless-stopped
+    ports:
+      - "4000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-storage:/var/lib/grafana
+
+volumes:
+  influxdb-storage:
+  grafana-storage:
